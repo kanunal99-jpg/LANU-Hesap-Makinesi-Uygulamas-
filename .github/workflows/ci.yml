@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [ "**" ]
+  pull_request:
+    branches: [ "**" ]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Grant execute permission for gradlew
+        run: chmod +x gradlew || true
+
+      - name: Run Unit Tests
+        run: gradle :app:testDebugUnitTest
+
+      - name: Run Lint
+        run: gradle lintDebug
+
+      - name: Build Debug APK
+        run: gradle :app:assembleDebug
+
+      - name: Verify APK & Generate Checksum
+        run: |
+          DEBUG_APK="app/build/outputs/apk/debug/app-debug.apk"
+          if [ -f "$DEBUG_APK" ]; then
+            sha256sum "$DEBUG_APK" > "app-debug.apk.sha256"
+            echo "APK verified and SHA-256 generated."
+          else
+            exit 1
+          fi
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lanu-hesap-makinesi-debug-apk
+          path: |
+            app/build/outputs/apk/debug/app-debug.apk
+            app-debug.apk.sha256

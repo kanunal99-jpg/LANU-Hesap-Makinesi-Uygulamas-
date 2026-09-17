@@ -1,0 +1,7 @@
+{
+  "name": "LANU Hesap Makinesi",
+  "description": "Profesyonel hesap makinesi ve finansal hesaplama uygulaması",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
+
