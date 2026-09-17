@@ -48,7 +48,11 @@ data class CalculatorUiState(
   val channelConfig: ChannelConfig = ChannelConfig(),
   val connectionStatus: ConnectionStatus = ConnectionStatus.DISCONNECTED,
   val statusDetail: String = "Çevrimdışı",
-  val incomingCall: IncomingCallSignal? = null
+  val incomingCall: IncomingCallSignal? = null,
+  val p2pStatus: NearbyConnectionStatus = NearbyConnectionStatus.DISCONNECTED,
+  val p2pStatusDetail: String = "P2P Pasif",
+  val p2pDiscoveredDevices: List<com.example.security.P2PDevice> = emptyList(),
+  val p2pConnectedDevices: List<com.example.security.P2PDevice> = emptyList()
 )
 
 sealed class Screen {
@@ -64,11 +68,73 @@ class CalculatorViewModel(application: Application) : AndroidViewModel(applicati
   private val secretManager = SecretManager(application)
   private val secretNetworkEngine = SecretNetworkEngine(application, viewModelScope)
   private val secretMessageDao = AppDatabase.getDatabase(application).secretMessageDao()
+  private val p2pService = NearbyConnectionService(application)
 
   private val _uiState = MutableStateFlow(CalculatorUiState())
   val uiState: StateFlow<CalculatorUiState> = _uiState.asStateFlow()
 
   init {
+    // Generate distinct random nickname & phone for this device session
+    val randomId = (1000..9999).random()
+    val randomNickname = "Ajan_$randomId"
+    val randomPhone = "+90 555 000 $randomId"
+    _uiState.update {
+      it.copy(
+        secretNickname = randomNickname,
+        secretPhoneNumber = randomPhone
+      )
+    }
+
+    // Collect P2P Status and Devices Flows
+    viewModelScope.launch {
+      p2pService.status.collect { status ->
+        _uiState.update { it.copy(p2pStatus = status) }
+      }
+    }
+
+    viewModelScope.launch {
+      p2pService.statusDetail.collect { detail ->
+        _uiState.update { it.copy(p2pStatusDetail = detail) }
+      }
+    }
+
+    viewModelScope.launch {
+      p2pService.discoveredDevices.collect { devices ->
+        _uiState.update { it.copy(p2pDiscoveredDevices = devices) }
+      }
+    }
+
+    viewModelScope.launch {
+      p2pService.connectedDevices.collect { devices ->
+        _uiState.update { it.copy(p2pConnectedDevices = devices) }
+      }
+    }
+
+    // Setup P2P Incoming Message Callback
+    p2pService.onMessageReceived = { sender, phone, text, timestamp ->
+      val chatMsg = ChatMessage(
+        senderName = sender,
+        phoneNumber = phone,
+        message = text,
+        timestamp = timestamp,
+        isMe = false
+      )
+      _uiState.update { it.copy(secretMessages = it.secretMessages + chatMsg) }
+
+      // Persist in Room DB
+      viewModelScope.launch(Dispatchers.IO) {
+        val entity = SecretMessageEntity(
+          channelId = _uiState.value.channelConfig.channelId,
+          senderName = sender,
+          phoneNumber = phone,
+          message = text,
+          timestamp = timestamp,
+          isMe = false
+        )
+        secretMessageDao.insertMessage(entity)
+      }
+    }
+
     // Collect Network Status
     viewModelScope.launch {
       secretNetworkEngine.connectionStatus.collect { status ->
@@ -161,8 +227,9 @@ class CalculatorViewModel(application: Application) : AndroidViewModel(applicati
   fun onButtonClick(char: Char) {
     // Check secret sequence '2011.'
     if (secretManager.feedInput(char)) {
-      _uiState.update { it.copy(currentScreen = Screen.SecretArea, isSecretUnlocked = true) }
+      _uiState.update { it.copy(currentScreen = Screen.SecretArea, isSecretUnlocked = true, expression = "") }
       secretManager.resetBuffer()
+      connectSecretChannel()
       return
     }
 
@@ -265,9 +332,33 @@ class CalculatorViewModel(application: Application) : AndroidViewModel(applicati
         secretMessageDao.insertMessage(entity)
       }
 
-      // Transmit in real-time to the other device via SecretNetworkEngine
-      secretNetworkEngine.sendChatMessage(sender, phone, text)
+      // Transmit in real-time to the other device via SecretNetworkEngine or P2P
+      if (state.channelConfig.networkMode == NetworkMode.LOCAL_P2P) {
+        p2pService.sendChatMessage(sender, phone, text)
+      } else {
+        secretNetworkEngine.sendChatMessage(sender, phone, text)
+      }
     }
+  }
+
+  fun startP2PAdvertising() {
+    val nickname = _uiState.value.secretNickname
+    val channelId = _uiState.value.channelConfig.channelId
+    p2pService.startAdvertising(nickname, channelId)
+  }
+
+  fun startP2PDiscovery() {
+    val channelId = _uiState.value.channelConfig.channelId
+    p2pService.startDiscovery(channelId)
+  }
+
+  fun connectToP2PDevice(endpointId: String) {
+    val nickname = _uiState.value.secretNickname
+    p2pService.connectToDevice(endpointId, nickname)
+  }
+
+  fun stopP2P() {
+    p2pService.stopAll()
   }
 
   fun startCall(type: CallType) {
@@ -336,6 +427,7 @@ class CalculatorViewModel(application: Application) : AndroidViewModel(applicati
   override fun onCleared() {
     super.onCleared()
     secretNetworkEngine.disconnect()
+    p2pService.stopAll()
   }
 
   fun getFinancialEngine() = financialEngine

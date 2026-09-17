@@ -176,7 +176,7 @@ class SecretNetworkEngine(
     activeConfig = config
     isRunning = true
 
-    connectionJob = scope.launch {
+    connectionJob = scope.launch(Dispatchers.IO) {
       if (config.networkMode == NetworkMode.CLOUD_MQTT) {
         connectMqttRelay(config)
       } else {
@@ -325,7 +325,7 @@ class SecretNetworkEngine(
 
   private fun startKeepAlive(out: OutputStream) {
     pingJob?.cancel()
-    pingJob = scope.launch {
+    pingJob = scope.launch(Dispatchers.IO) {
       while (isRunning && isActive) {
         delay(25000)
         try {

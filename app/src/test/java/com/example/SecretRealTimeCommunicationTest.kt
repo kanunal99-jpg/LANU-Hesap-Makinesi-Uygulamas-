@@ -99,40 +99,55 @@ class SecretRealTimeCommunicationTest {
 
   @Test
   fun testViewModel_MultiPersonChatAndPersistence() = runTest {
-    val viewModel = CalculatorViewModel(context)
-    viewModel.verifySecretPassword("admin2011")
-    viewModel.updateSecretProfile("Ajan Beta", "+90 555 987 6543")
+    try {
+      val viewModel = CalculatorViewModel(context)
+      viewModel.verifySecretPassword("admin2011")
+      viewModel.updateSecretProfile("Ajan Beta", "+90 555 987 6543")
 
-    // User A sends outgoing message
-    viewModel.sendSecretMessage("Merhaba, güvenli hat aktif mi?")
-    val messagesAfterSend = viewModel.uiState.value.secretMessages
-    assertTrue(messagesAfterSend.any { it.message == "Merhaba, güvenli hat aktif mi?" && it.isMe })
+      // User A sends outgoing message
+      viewModel.sendSecretMessage("Merhaba, güvenli hat aktif mi?")
+      testScheduler.advanceUntilIdle()
+      val messagesAfterSend = viewModel.uiState.value.secretMessages
+      assertTrue(messagesAfterSend.any { it.message == "Merhaba, güvenli hat aktif mi?" && it.isMe })
 
-    // Simulate incoming message packet from User B ("Ajan Gamma")
-    val sharedSecret = viewModel.uiState.value.channelConfig.encryptionKey
-    val encryptedPayload = viewModel.networkEngine.encrypt("Evet hat aktif, seni duyabiliyorum.", sharedSecret)
-    val packet = JSONObject().apply {
-      put("type", "CHAT")
-      put("senderId", "remote-user-gamma")
-      put("sender", "Ajan Gamma")
-      put("phone", "+90 555 333 4455")
-      put("payload", encryptedPayload)
-      put("time", System.currentTimeMillis())
-    }.toString()
+      // Simulate incoming message packet from User B ("Ajan Gamma")
+      val sharedSecret = viewModel.uiState.value.channelConfig.encryptionKey
+      val encryptedPayload = viewModel.networkEngine.encrypt("Evet hat aktif, seni duyabiliyorum.", sharedSecret)
+      val packet = JSONObject().apply {
+        put("type", "CHAT")
+        put("senderId", "remote-user-gamma")
+        put("sender", "Ajan Gamma")
+        put("phone", "+90 555 333 4455")
+        put("payload", encryptedPayload)
+        put("time", System.currentTimeMillis())
+      }.toString()
 
-    // Pass packet into network engine
-    viewModel.networkEngine.handlePayloadJson(packet, sharedSecret)
+      // Pass packet into network engine
+      viewModel.networkEngine.handlePayloadJson(packet, sharedSecret)
+      testScheduler.advanceUntilIdle()
 
-    val updatedMessages = viewModel.uiState.value.secretMessages
-    val incomingMsg = updatedMessages.find { it.message == "Evet hat aktif, seni duyabiliyorum." }
-    assertNotNull(incomingMsg)
-    assertEquals("Ajan Gamma", incomingMsg?.senderName)
-    assertFalse(incomingMsg?.isMe ?: true)
+      val updatedMessages = viewModel.uiState.value.secretMessages
+      val incomingMsg = updatedMessages.find { it.message == "Evet hat aktif, seni duyabiliyorum." }
+      assertNotNull(incomingMsg)
+      assertEquals("Ajan Gamma", incomingMsg?.senderName)
+      assertFalse(incomingMsg?.isMe ?: true)
 
-    // Verify messages saved in Room DB
-    val savedDao = database.secretMessageDao()
-    val savedInDb = savedDao.getMessagesForChannel(viewModel.uiState.value.channelConfig.channelId)
-    assertTrue(savedInDb.size >= 2)
+      // Verify messages saved in Room DB
+      val savedDao = database.secretMessageDao()
+      var savedInDb = emptyList<com.example.database.SecretMessageEntity>()
+      kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+        for (i in 1..50) {
+          savedInDb = savedDao.getMessagesForChannel(viewModel.uiState.value.channelConfig.channelId)
+          if (savedInDb.size >= 2) break
+          Thread.sleep(50)
+        }
+      }
+      assertTrue("Room DB should save at least 2 messages, but had: ${savedInDb.size}", savedInDb.size >= 2)
+    } catch (e: Throwable) {
+      System.err.println("DEBUG_TEST_FAILURE_STACKTRACE:")
+      e.printStackTrace()
+      throw e
+    }
   }
 
   @Test
@@ -157,6 +172,7 @@ class SecretRealTimeCommunicationTest {
 
     // Handle packet
     viewModel.networkEngine.handlePayloadJson(packet, sharedSecret)
+    testScheduler.advanceUntilIdle()
 
     // Verify incoming call signal state
     val incoming = viewModel.uiState.value.incomingCall
@@ -166,6 +182,7 @@ class SecretRealTimeCommunicationTest {
 
     // User accepts call
     viewModel.acceptIncomingCall()
+    testScheduler.advanceUntilIdle()
 
     // Verify call is now active and in video mode
     assertTrue(viewModel.uiState.value.isCallActive)
@@ -174,6 +191,7 @@ class SecretRealTimeCommunicationTest {
 
     // End call
     viewModel.endCall()
+    testScheduler.advanceUntilIdle()
     assertFalse(viewModel.uiState.value.isCallActive)
   }
 }

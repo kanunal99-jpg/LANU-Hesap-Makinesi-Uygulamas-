@@ -44,8 +44,15 @@ fun SecretAreaScreen(
   val context = LocalContext.current
   val state by viewModel.uiState.collectAsState()
   var passwordInput by remember { mutableStateOf("") }
-  var isUnlocked by remember { mutableStateOf(state.isSecretUnlocked) }
+  var isUnlocked by remember(state.isSecretUnlocked) { mutableStateOf(state.isSecretUnlocked) }
   var errorMsg by remember { mutableStateOf("") }
+
+  // Auto-connect to secure channel when unlocked
+  LaunchedEffect(isUnlocked) {
+    if (isUnlocked) {
+      viewModel.connectSecretChannel()
+    }
+  }
 
   // Tab state for unlocked area: 0: Profil, 1: Mesajlaşma, 2: Arama, 3: Loglar
   var selectedTab by remember { mutableIntStateOf(1) }
@@ -492,133 +499,140 @@ fun SecretAreaScreen(
             }
           }
           1 -> {
-            // Secure Live Messaging
-            Column(
-              modifier = Modifier
-                .fillMaxWidth()
-                .weight(1f),
-              verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-              Card(
+            if (state.channelConfig.networkMode == NetworkMode.LOCAL_P2P) {
+              ChatInterface(
+                viewModel = viewModel,
+                modifier = Modifier.weight(1f)
+              )
+            } else {
+              // Secure Live Messaging
+              Column(
                 modifier = Modifier
                   .fillMaxWidth()
-                  .weight(1f)
-                  .testTag("messages_card"),
-                shape = RoundedCornerShape(16.dp)
+                  .weight(1f),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
               ) {
-                Column(modifier = Modifier.fillMaxSize()) {
-                  // Channel Header Bar inside Chat
-                  Row(
-                    modifier = Modifier
-                      .fillMaxWidth()
-                      .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
-                      .padding(horizontal = 16.dp, vertical = 8.dp),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                  ) {
-                    Text(
-                      text = "Hat: ${state.channelConfig.channelId} (${if (state.connectionStatus == ConnectionStatus.CONNECTED) "Bağlı" else "Bağlantı Bekleniyor"})",
-                      fontSize = 12.sp,
-                      fontWeight = FontWeight.Medium
-                    )
-                    IconButton(
-                      onClick = { viewModel.clearChatHistory() },
-                      modifier = Modifier.size(28.dp)
+                Card(
+                  modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+                    .testTag("messages_card"),
+                  shape = RoundedCornerShape(16.dp)
+                ) {
+                  Column(modifier = Modifier.fillMaxSize()) {
+                    // Channel Header Bar inside Chat
+                    Row(
+                      modifier = Modifier
+                        .fillMaxWidth()
+                        .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                      horizontalArrangement = Arrangement.SpaceBetween,
+                      verticalAlignment = Alignment.CenterVertically
                     ) {
-                      Icon(Icons.Default.DeleteOutline, contentDescription = "Sohbeti Temizle", modifier = Modifier.size(20.dp))
-                    }
-                  }
-
-                  LazyColumn(
-                    modifier = Modifier
-                      .fillMaxSize()
-                      .padding(horizontal = 16.dp, vertical = 8.dp)
-                      .testTag("chat_messages_list"),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
-                  ) {
-                    items(state.secretMessages) { msg ->
-                      val isMe = msg.isMe
-                      val alignment = if (isMe) Alignment.End else Alignment.Start
-                      val bgColor = if (isMe) {
-                        MaterialTheme.colorScheme.primaryContainer
-                      } else {
-                        MaterialTheme.colorScheme.surfaceVariant
-                      }
-                      val timeFormat = SimpleDateFormat("HH:mm", Locale.getDefault())
-                      val timeStr = timeFormat.format(Date(msg.timestamp))
-
-                      Column(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalAlignment = alignment
+                      Text(
+                        text = "Hat: ${state.channelConfig.channelId} (${if (state.connectionStatus == ConnectionStatus.CONNECTED) "Bağlı" else "Bağlantı Bekleniyor"})",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Medium
+                      )
+                      IconButton(
+                        onClick = { viewModel.clearChatHistory() },
+                        modifier = Modifier.size(28.dp)
                       ) {
+                        Icon(Icons.Default.DeleteOutline, contentDescription = "Sohbeti Temizle", modifier = Modifier.size(20.dp))
+                      }
+                    }
+
+                    LazyColumn(
+                      modifier = Modifier
+                        .fillMaxSize()
+                        .padding(horizontal = 16.dp, vertical = 8.dp)
+                        .testTag("chat_messages_list"),
+                      verticalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                      items(state.secretMessages) { msg ->
+                        val isMe = msg.isMe
+                        val alignment = if (isMe) Alignment.End else Alignment.Start
+                        val bgColor = if (isMe) {
+                          MaterialTheme.colorScheme.primaryContainer
+                        } else {
+                          MaterialTheme.colorScheme.surfaceVariant
+                        }
+                        val timeFormat = SimpleDateFormat("HH:mm", Locale.getDefault())
+                        val timeStr = timeFormat.format(Date(msg.timestamp))
+
                         Column(
-                          modifier = Modifier
-                            .widthIn(max = 280.dp)
-                            .background(color = bgColor, shape = RoundedCornerShape(14.dp))
-                            .padding(12.dp)
+                          modifier = Modifier.fillMaxWidth(),
+                          horizontalAlignment = alignment
                         ) {
-                          Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.SpaceBetween,
-                            verticalAlignment = Alignment.CenterVertically
+                          Column(
+                            modifier = Modifier
+                              .widthIn(max = 280.dp)
+                              .background(color = bgColor, shape = RoundedCornerShape(14.dp))
+                              .padding(12.dp)
                           ) {
+                            Row(
+                              modifier = Modifier.fillMaxWidth(),
+                              horizontalArrangement = Arrangement.SpaceBetween,
+                              verticalAlignment = Alignment.CenterVertically
+                            ) {
+                              Text(
+                                text = if (isMe) "Siz (${msg.senderName})" else "${msg.senderName} (${msg.phoneNumber})",
+                                fontWeight = FontWeight.Bold,
+                                color = if (isMe) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondary,
+                                fontSize = 12.sp
+                              )
+                              Text(
+                                text = timeStr,
+                                fontSize = 10.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                              )
+                            }
+                            Spacer(modifier = Modifier.height(4.dp))
                             Text(
-                              text = if (isMe) "Siz (${msg.senderName})" else "${msg.senderName} (${msg.phoneNumber})",
-                              fontWeight = FontWeight.Bold,
-                              color = if (isMe) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondary,
-                              fontSize = 12.sp
-                            )
-                            Text(
-                              text = timeStr,
-                              fontSize = 10.sp,
-                              color = MaterialTheme.colorScheme.onSurfaceVariant
+                              text = msg.message,
+                              fontSize = 15.sp,
+                              color = MaterialTheme.colorScheme.onSurface
                             )
                           }
-                          Spacer(modifier = Modifier.height(4.dp))
-                          Text(
-                            text = msg.message,
-                            fontSize = 15.sp,
-                            color = MaterialTheme.colorScheme.onSurface
-                          )
                         }
                       }
                     }
                   }
                 }
-              }
 
-              Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically
-              ) {
-                OutlinedTextField(
-                  value = messageInput,
-                  onValueChange = { messageInput = it },
-                  placeholder = { Text("Şifreli canlı mesaj yaz (${state.secretNickname})...") },
-                  modifier = Modifier
-                    .weight(1f)
-                    .testTag("chat_message_input"),
-                  shape = RoundedCornerShape(24.dp)
-                )
-                IconButton(
-                  onClick = {
-                    if (messageInput.isNotBlank()) {
-                      viewModel.sendSecretMessage(messageInput)
-                      messageInput = ""
-                    }
-                  },
-                  modifier = Modifier
-                    .size(48.dp)
-                    .clip(CircleShape)
-                    .background(MaterialTheme.colorScheme.primary)
-                    .testTag("send_message_button")
+                Row(
+                  modifier = Modifier.fillMaxWidth(),
+                  horizontalArrangement = Arrangement.spacedBy(8.dp),
+                  verticalAlignment = Alignment.CenterVertically
                 ) {
-                  Icon(
-                    Icons.AutoMirrored.Filled.Send,
-                    contentDescription = "Mesaj Gönder",
-                    tint = MaterialTheme.colorScheme.onPrimary
+                  OutlinedTextField(
+                    value = messageInput,
+                    onValueChange = { messageInput = it },
+                    placeholder = { Text("Şifreli canlı mesaj yaz (${state.secretNickname})...") },
+                    modifier = Modifier
+                      .weight(1f)
+                      .testTag("chat_message_input"),
+                    shape = RoundedCornerShape(24.dp)
                   )
+                  IconButton(
+                    onClick = {
+                      if (messageInput.isNotBlank()) {
+                        viewModel.sendSecretMessage(messageInput)
+                        messageInput = ""
+                      }
+                    },
+                    modifier = Modifier
+                      .size(48.dp)
+                      .clip(CircleShape)
+                      .background(MaterialTheme.colorScheme.primary)
+                      .testTag("send_message_button")
+                  ) {
+                    Icon(
+                      Icons.AutoMirrored.Filled.Send,
+                      contentDescription = "Mesaj Gönder",
+                      tint = MaterialTheme.colorScheme.onPrimary
+                    )
+                  }
                 }
               }
             }
