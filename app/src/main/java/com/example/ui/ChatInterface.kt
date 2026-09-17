@@ -24,14 +24,19 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.example.security.MessageState
 import com.example.security.NearbyConnectionStatus
 import com.example.security.PermissionManager
 import java.text.SimpleDateFormat
 import java.util.*
 
+/**
+ * P2P Chat Interface integrated with CommunicationViewModel.
+ * Supports manual handshake digit verification, E2E AEAD encryption, and per-message state tracking.
+ */
 @Composable
 fun ChatInterface(
-    viewModel: CalculatorViewModel,
+    viewModel: CommunicationViewModel,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
@@ -140,9 +145,9 @@ fun ChatInterface(
                                 fontSize = 13.sp,
                                 color = MaterialTheme.colorScheme.onSurface
                             )
-                            if (state.p2pConnectedDevices.isNotEmpty()) {
+                            if (state.connectedDevices.isNotEmpty()) {
                                 Text(
-                                    text = "Bağlı Cihaz: ${state.p2pConnectedDevices.firstOrNull()?.endpointName}",
+                                    text = "Bağlı Cihaz: ${state.connectedDevices.firstOrNull()?.endpointName}",
                                     fontSize = 11.sp,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
                                 )
@@ -164,7 +169,70 @@ fun ChatInterface(
                 }
             }
 
-            // 3. Controller Actions Panel (Start Advertising / Discovery)
+            // 3. Handshake Digit Verification Request Dialog
+            val pendingReq = state.pendingP2PRequest
+            if (pendingReq != null) {
+                AlertDialog(
+                    onDismissRequest = { viewModel.rejectP2PConnection(pendingReq.endpointId) },
+                    icon = {
+                        Icon(
+                            imageVector = Icons.Default.Security,
+                            contentDescription = "Handshake Verification",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(36.dp)
+                        )
+                    },
+                    title = { Text("🔒 Güvenli Bağlantı Doğrulama") },
+                    text = {
+                        Column(
+                            verticalArrangement = Arrangement.spacedBy(10.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            Text(
+                                text = "${pendingReq.endpointName} bağlantı isteği gönderiyor.",
+                                fontSize = 14.sp
+                            )
+                            Text(
+                                text = "Her iki ekrandaki güvenlik kodunun eşleştiğini doğrulayın:",
+                                fontSize = 13.sp,
+                                color = Color.Gray
+                            )
+                            // Strict authentic handshake verification digits
+                            Surface(
+                                color = MaterialTheme.colorScheme.primaryContainer,
+                                shape = RoundedCornerShape(8.dp),
+                                modifier = Modifier.padding(vertical = 8.dp)
+                            ) {
+                                Text(
+                                    text = pendingReq.authCode,
+                                    fontSize = 24.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    letterSpacing = 2.sp,
+                                    modifier = Modifier.padding(horizontal = 24.dp, vertical = 12.dp),
+                                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                                )
+                            }
+                        }
+                    },
+                    confirmButton = {
+                        Button(
+                            onClick = { viewModel.acceptP2PConnection(pendingReq.endpointId) },
+                            colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF2E7D32))
+                        ) {
+                            Text("Kodu Doğrula & Bağlan")
+                        }
+                    },
+                    dismissButton = {
+                        TextButton(
+                            onClick = { viewModel.rejectP2PConnection(pendingReq.endpointId) }
+                        ) {
+                            Text("Reddet", color = MaterialTheme.colorScheme.error)
+                        }
+                    }
+                )
+            }
+
+            // 4. Controller Actions Panel (Start Advertising / Discovery)
             if (state.p2pStatus == NearbyConnectionStatus.DISCONNECTED || state.p2pStatus == NearbyConnectionStatus.ERROR) {
                 Card(
                     modifier = Modifier.fillMaxWidth(),
@@ -180,7 +248,7 @@ fun ChatInterface(
                             fontSize = 14.sp
                         )
                         Text(
-                            text = "Bir cihazın Yayın Başlatması, diğerinin ise Keşfetme (Tarama) başlatması gerekir.",
+                            text = "Bir cihazın Yayın Başlatması, diğerinin ise Cihaz Ara (Tarama) başlatması gerekir.",
                             fontSize = 12.sp,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
@@ -213,9 +281,9 @@ fun ChatInterface(
                 }
             }
 
-            // 4. Discovery Results (if scanning)
+            // 5. Discovery Results (if scanning)
             if (state.p2pStatus == NearbyConnectionStatus.DISCOVERING) {
-                if (state.p2pDiscoveredDevices.isEmpty()) {
+                if (state.discoveredDevices.isEmpty()) {
                     Box(
                         modifier = Modifier
                             .fillMaxWidth()
@@ -245,7 +313,7 @@ fun ChatInterface(
                                 fontWeight = FontWeight.Bold,
                                 fontSize = 13.sp
                             )
-                            state.p2pDiscoveredDevices.forEach { device ->
+                            state.discoveredDevices.forEach { device ->
                                 Row(
                                     modifier = Modifier
                                         .fillMaxWidth()
@@ -278,7 +346,7 @@ fun ChatInterface(
                 }
             }
 
-            // 5. Messages List Box
+            // 6. Messages List Box
             Card(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -293,7 +361,7 @@ fun ChatInterface(
                             .testTag("p2p_chat_messages_list"),
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
-                        items(state.secretMessages) { msg ->
+                        items(state.messages) { msg ->
                             val isMe = msg.isMe
                             val alignment = if (isMe) Alignment.End else Alignment.Start
                             val bgColor = if (isMe) {
@@ -301,42 +369,77 @@ fun ChatInterface(
                             } else {
                                 MaterialTheme.colorScheme.surfaceVariant
                             }
-                            val timeFormat = SimpleDateFormat("HH:mm", Locale.getDefault())
-                            val timeStr = timeFormat.format(Date(msg.timestamp))
 
                             Column(
-                                modifier = Modifier.fillMaxWidth(),
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 4.dp),
                                 horizontalAlignment = alignment
                             ) {
-                                Column(
+                                Text(
+                                    text = if (isMe) "Siz (${msg.phoneNumber})" else "${msg.senderName} (${msg.phoneNumber})",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Box(
                                     modifier = Modifier
-                                        .widthIn(max = 280.dp)
-                                        .background(color = bgColor, shape = RoundedCornerShape(14.dp))
-                                        .padding(10.dp)
+                                        .clip(
+                                            RoundedCornerShape(
+                                                topStart = 12.dp,
+                                                topEnd = 12.dp,
+                                                bottomStart = if (isMe) 12.dp else 0.dp,
+                                                bottomEnd = if (isMe) 0.dp else 12.dp
+                                            )
+                                        )
+                                        .background(bgColor)
+                                        .padding(horizontal = 12.dp, vertical = 8.dp)
                                 ) {
-                                    Row(
-                                        modifier = Modifier.fillMaxWidth(),
-                                        horizontalArrangement = Arrangement.SpaceBetween,
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
+                                    Column(horizontalAlignment = Alignment.End) {
                                         Text(
-                                            text = if (isMe) "Siz (${msg.senderName})" else "${msg.senderName}",
-                                            fontWeight = FontWeight.Bold,
-                                            color = if (isMe) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondary,
-                                            fontSize = 11.sp
+                                            text = msg.message,
+                                            fontSize = 14.sp,
+                                            color = MaterialTheme.colorScheme.onSurface
                                         )
-                                        Text(
-                                            text = timeStr,
-                                            fontSize = 9.sp,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                                        )
+                                        Spacer(modifier = Modifier.height(4.dp))
+                                        
+                                        // Status & Time Row
+                                        Row(
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                        ) {
+                                            val sdf = SimpleDateFormat("HH:mm", Locale.getDefault())
+                                            Text(
+                                                text = sdf.format(Date(msg.timestamp)),
+                                                fontSize = 9.sp,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f)
+                                            )
+                                            
+                                            // Message State Indicator Icon
+                                            if (isMe) {
+                                                val msgState = state.messageStates[msg.id] ?: MessageState.SENT
+                                                val stateSymbol = when (msgState) {
+                                                    MessageState.PENDING -> "⏱️"
+                                                    MessageState.SENDING -> "⏳"
+                                                    MessageState.SENT -> "✓"
+                                                    MessageState.DELIVERED -> "✓✓"
+                                                    MessageState.FAILED -> "❌"
+                                                }
+                                                val stateColor = when (msgState) {
+                                                    MessageState.FAILED -> MaterialTheme.colorScheme.error
+                                                    MessageState.DELIVERED -> Color(0xFF2E7D32)
+                                                    else -> MaterialTheme.colorScheme.onSurfaceVariant
+                                                }
+                                                Text(
+                                                    text = stateSymbol,
+                                                    fontSize = 10.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = stateColor
+                                                )
+                                            }
+                                        }
                                     }
-                                    Spacer(modifier = Modifier.height(2.dp))
-                                    Text(
-                                        text = msg.message,
-                                        fontSize = 14.sp,
-                                        color = MaterialTheme.colorScheme.onSurface
-                                    )
                                 }
                             }
                         }
@@ -344,52 +447,40 @@ fun ChatInterface(
                 }
             }
 
-            // 6. Text message input and send
+            // 7. Input and Disconnect Actions
             Row(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 4.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 OutlinedTextField(
                     value = textInput,
                     onValueChange = { textInput = it },
-                    placeholder = {
-                        Text(
-                            text = if (state.p2pStatus == NearbyConnectionStatus.CONNECTED)
-                                "P2P güvenli mesaj yaz..."
-                            else
-                                "Önce P2P bağlantısı kurun..."
-                        )
-                    },
-                    enabled = state.p2pStatus == NearbyConnectionStatus.CONNECTED,
+                    placeholder = { Text("Güvenli mesaj yazın...", fontSize = 14.sp) },
                     modifier = Modifier
                         .weight(1f)
-                        .testTag("p2p_chat_message_input"),
-                    shape = RoundedCornerShape(24.dp)
+                        .testTag("p2p_message_input"),
+                    shape = RoundedCornerShape(24.dp),
+                    singleLine = true
                 )
 
                 IconButton(
                     onClick = {
                         if (textInput.isNotBlank()) {
-                            viewModel.sendSecretMessage(textInput)
+                            viewModel.sendMessage(textInput)
                             textInput = ""
                         }
                     },
-                    enabled = state.p2pStatus == NearbyConnectionStatus.CONNECTED,
                     modifier = Modifier
-                        .size(48.dp)
                         .clip(CircleShape)
-                        .background(
-                            if (state.p2pStatus == NearbyConnectionStatus.CONNECTED)
-                                MaterialTheme.colorScheme.primary
-                            else
-                                MaterialTheme.colorScheme.outline
-                        )
-                        .testTag("p2p_send_message_button")
+                        .background(MaterialTheme.colorScheme.primary)
+                        .testTag("p2p_send_button")
                 ) {
                     Icon(
-                        Icons.AutoMirrored.Filled.Send,
-                        contentDescription = "P2P Gönder",
+                        imageVector = Icons.AutoMirrored.Filled.Send,
+                        contentDescription = "Mesaj Gönder",
                         tint = MaterialTheme.colorScheme.onPrimary
                     )
                 }

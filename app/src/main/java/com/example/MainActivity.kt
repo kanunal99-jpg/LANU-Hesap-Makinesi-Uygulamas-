@@ -51,7 +51,7 @@ class MainActivity : ComponentActivity() {
               onBack = { viewModel.navigateTo(Screen.Calculator) }
             )
             is Screen.SecretArea -> SecretAreaScreen(
-              viewModel = viewModel,
+              calculatorViewModel = viewModel,
               onBack = { viewModel.navigateTo(Screen.Calculator) }
             )
           }

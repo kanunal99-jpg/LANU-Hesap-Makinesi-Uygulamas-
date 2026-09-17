@@ -2,63 +2,92 @@ package com.example.security
 
 import android.content.Context
 import android.content.SharedPreferences
+import android.util.Base64
+import android.util.Log
 import com.example.database.AppDatabase
 import com.example.database.AuditLogEntity
-import java.security.MessageDigest
+import java.security.SecureRandom
+import javax.crypto.spec.SecretKeySpec
 
-class SecretManager(context: Context) {
-  private val prefs: SharedPreferences = context.getSharedPreferences("lanu_secure_prefs", Context.MODE_PRIVATE)
-  private val auditLogDao = AppDatabase.getDatabase(context).auditLogDao()
+/**
+ * SecretManager manages UI access triggering via '2011.'
+ * It also secures local database audit logs using robust AES-GCM (AEAD) encryption
+ * with keys safely persisted in private shared preferences.
+ */
+class SecretManager(private val context: Context) {
+    private val prefs: SharedPreferences = context.getSharedPreferences("lanu_secure_prefs", Context.MODE_PRIVATE)
+    private val auditLogDao = AppDatabase.getDatabase(context).auditLogDao()
 
-  private val targetSequence = "2011."
-  private val inputBuffer = StringBuilder()
+    private val targetSequence = "2011."
+    private val inputBuffer = StringBuilder()
 
-  fun feedInput(char: Char): Boolean {
-    inputBuffer.append(char)
-    val current = inputBuffer.toString()
-    if (current == targetSequence) {
-      return true
+    init {
+        // Automatically provision local 256-bit log encryption key if not exists
+        if (prefs.getString("log_crypto_key", null) == null) {
+            val rawKey = ByteArray(32).also { SecureRandom().nextBytes(it) }
+            val keyBase64 = Base64.encodeToString(rawKey, Base64.NO_WRAP)
+            prefs.edit().putString("log_crypto_key", keyBase64).apply()
+        }
     }
-    if (current.length > targetSequence.length) {
-      return false
+
+    private fun getLogKey(): SecretKeySpec? {
+        return try {
+            val keyBase64 = prefs.getString("log_crypto_key", null) ?: return null
+            val rawKey = Base64.decode(keyBase64, Base64.NO_WRAP)
+            SecretKeySpec(rawKey, "AES")
+        } catch (e: Exception) {
+            Log.e("SecretManager", "Failed retrieving log key: ${e.message}")
+            null
+        }
     }
-    return false
-  }
 
-  fun resetBuffer() {
-    inputBuffer.clear()
-  }
-
-  fun setMasterPassword(password: String) {
-    val hash = sha256(password)
-    prefs.edit().putString("master_hash", hash).apply()
-  }
-
-  fun verifyMasterPassword(password: String): Boolean {
-    val savedHash = prefs.getString("master_hash", sha256("admin2011")) ?: sha256("admin2011")
-    return sha256(password) == savedHash
-  }
-
-  fun logOperation(operation: String, result: String) {
-    val encryptedPayload = sha256("$operation = $result | ${System.currentTimeMillis()}")
-    val entity = AuditLogEntity(
-      operation = operation,
-      result = result,
-      encryptedPayload = encryptedPayload
-    )
-    auditLogDao.insertLog(entity)
-  }
-
-  fun getLogs(password: String): List<String> {
-    if (!verifyMasterPassword(password)) return listOf("Yetkisiz Erişim! Şifre yanlış.")
-    val dbLogs = auditLogDao.getAllLogs()
-    return dbLogs.map { log ->
-      "[Şifreli Kayıt Room] Zaman: ${log.timestamp} | ${log.operation} = ${log.result} | Hash: ${log.encryptedPayload.take(12)}..."
+    fun feedInput(char: Char): Boolean {
+        inputBuffer.append(char)
+        return inputBuffer.toString() == targetSequence
     }
-  }
 
-  private fun sha256(input: String): String {
-    val bytes = MessageDigest.getInstance("SHA-256").digest(input.toByteArray())
-    return bytes.joinToString("") { "%02x".format(it) }
-  }
+    fun resetBuffer() {
+        inputBuffer.clear()
+    }
+
+    /**
+     * Secures the audit log with true AES-GCM encryption.
+     */
+    fun logOperation(operation: String, result: String) {
+        try {
+            val keySpec = getLogKey() ?: return
+            val plainPayload = "$operation = $result | Zaman: ${System.currentTimeMillis()}"
+            val encrypted = AEADEngine.encrypt(plainPayload, keySpec)
+
+            val entity = AuditLogEntity(
+                operation = operation,
+                result = result,
+                encryptedPayload = encrypted
+            )
+            auditLogDao.insertLog(entity)
+        } catch (e: Exception) {
+            Log.e("SecretManager", "Failed encrypting operation log: ${e.message}")
+        }
+    }
+
+    /**
+     * Decrypts the secure logs for display on the Audit Logs tab.
+     */
+    fun getLogs(): List<String> {
+        return try {
+            val keySpec = getLogKey() ?: return listOf("Şifreleme anahtarı bulunamadı.")
+            val dbLogs = auditLogDao.getAllLogs()
+            dbLogs.map { log ->
+                try {
+                    val decrypted = AEADEngine.decrypt(log.encryptedPayload, keySpec)
+                    "[Şifreli Kayıt Room] $decrypted"
+                } catch (e: Exception) {
+                    "[Şifreli Kayıt Room] Şifre Çözme Hatası (Bozuk Veri)"
+                }
+            }
+        } catch (e: Exception) {
+            Log.e("SecretManager", "Failed gathering secure logs: ${e.message}")
+            emptyList()
+        }
+    }
 }

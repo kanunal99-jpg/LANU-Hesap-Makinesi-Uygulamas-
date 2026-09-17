@@ -9,9 +9,6 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import org.json.JSONObject
 
-/**
- * P2P Connection status enum.
- */
 enum class NearbyConnectionStatus {
     DISCONNECTED,
     ADVERTISING,
@@ -21,9 +18,16 @@ enum class NearbyConnectionStatus {
     ERROR
 }
 
+data class P2PDevice(
+    val endpointId: String,
+    val endpointName: String,
+    val authCode: String = "" // Handshake verification code
+)
+
 /**
- * Production-grade P2P connection service using Google Nearby Connections API.
- * This class handles nearby discovery, advertising, automatic handshake, and encrypted payload routing.
+ * Production-grade secure P2P connection service using Google Nearby Connections API.
+ * Uses AES-GCM AEAD encryption for all message payloads with zero plaintext fallback.
+ * Eliminates auto-blind acceptance: provides strict verification dialog callbacks with security handshake digits.
  */
 class NearbyConnectionService(private val context: Context) {
 
@@ -46,11 +50,15 @@ class NearbyConnectionService(private val context: Context) {
     private val _connectedDevices = MutableStateFlow<List<P2PDevice>>(emptyList())
     val connectedDevices: StateFlow<List<P2PDevice>> = _connectedDevices.asStateFlow()
 
+    // Holds pending connection requests to be accepted/rejected by the user after manual digit verification
+    private val _pendingRequest = MutableStateFlow<P2PDevice?>(null)
+    val pendingRequest: StateFlow<P2PDevice?> = _pendingRequest.asStateFlow()
+
     // Callback for incoming messages
     var onMessageReceived: ((senderName: String, phoneNumber: String, message: String, timestamp: Long) -> Unit)? = null
 
-    // Passphrase for AES-256 E2E decryption
-    var encryptionKey: String = "admin2011"
+    // E2E AEAD Passphrase
+    var encryptionKey: String = "Ajan_Secure_Pass"
 
     /**
      * PayloadCallback handles incoming data transfers.
@@ -66,56 +74,52 @@ class NearbyConnectionService(private val context: Context) {
 
         override fun onPayloadTransferUpdate(endpointId: String, update: PayloadTransferUpdate) {
             if (update.status == PayloadTransferUpdate.Status.SUCCESS) {
-                Log.d(TAG, "Transfer completed with $endpointId")
+                Log.d(TAG, "Payload transfer completed successfully with $endpointId")
             }
         }
     }
 
     /**
-     * ConnectionLifecycleCallback handles initiation, result and termination of connection requests.
+     * ConnectionLifecycleCallback handles initiation, result, and termination of connections.
+     * Eliminates "auto-accept" (automatic blind accept). Requires user verification.
      */
     inner class ServiceConnectionLifecycleCallback : ConnectionLifecycleCallback() {
         override fun onConnectionInitiated(endpointId: String, connectionInfo: ConnectionInfo) {
             Log.d(TAG, "Connection initiated with: $endpointId (${connectionInfo.endpointName})")
             _status.value = NearbyConnectionStatus.CONNECTING
-            _statusDetail.value = "Eşleşme kuruluyor: ${connectionInfo.endpointName}"
+            _statusDetail.value = "Güvenli el sıkışma kodu doğrulanıyor..."
 
-            // Automatically accept the connection on both sides
-            connectionsClient.acceptConnection(endpointId, ServicePayloadCallback())
-                .addOnSuccessListener {
-                    Log.d(TAG, "Connection request accepted successfully for $endpointId")
-                }
-                .addOnFailureListener { e ->
-                    Log.e(TAG, "Failed to accept connection for $endpointId", e)
-                    _status.value = NearbyConnectionStatus.ERROR
-                    _statusDetail.value = "Eşleşme reddedildi: ${e.localizedMessage}"
-                }
+            val authCode = connectionInfo.authenticationToken
+            val device = P2PDevice(endpointId, connectionInfo.endpointName, authCode)
+            
+            // Present the pending connection request to UI (with verification digits)
+            _pendingRequest.value = device
         }
 
         override fun onConnectionResult(endpointId: String, result: ConnectionResolution) {
+            _pendingRequest.value = null // Clear pending
             when (result.status.statusCode) {
                 ConnectionsStatusCodes.STATUS_OK -> {
                     Log.d(TAG, "Successfully connected to: $endpointId")
                     _status.value = NearbyConnectionStatus.CONNECTED
-                    _statusDetail.value = "P2P Güvenli Hat Bağlandı"
+                    _statusDetail.value = "P2P Güvenli Bağlantı Başarılı"
 
-                    // Append device to connected list
                     val currentList = _connectedDevices.value.toMutableList()
                     if (currentList.none { it.endpointId == endpointId }) {
-                        val discoveredName = _discoveredDevices.value.find { it.endpointId == endpointId }?.endpointName ?: "Ajan"
-                        currentList.add(P2PDevice(endpointId, discoveredName))
+                        val name = _discoveredDevices.value.find { it.endpointId == endpointId }?.endpointName ?: "Gizli Ajan"
+                        currentList.add(P2PDevice(endpointId, name))
                         _connectedDevices.value = currentList
                     }
                 }
                 ConnectionsStatusCodes.STATUS_CONNECTION_REJECTED -> {
                     Log.d(TAG, "Connection was rejected by $endpointId")
                     _status.value = NearbyConnectionStatus.DISCONNECTED
-                    _statusDetail.value = "Bağlantı karşı cihaz tarafından reddedildi"
+                    _statusDetail.value = "Bağlantı reddedildi"
                 }
                 else -> {
-                    Log.e(TAG, "Connection failed with status code: ${result.status.statusCode}")
+                    Log.e(TAG, "Connection failed: ${result.status.statusCode}")
                     _status.value = NearbyConnectionStatus.ERROR
-                    _statusDetail.value = "Bağlantı hatası (Hata Kodu: ${result.status.statusCode})"
+                    _statusDetail.value = "Bağlantı Hatası (Kod: ${result.status.statusCode})"
                 }
             }
         }
@@ -128,9 +132,9 @@ class NearbyConnectionService(private val context: Context) {
 
             if (currentList.isEmpty()) {
                 _status.value = NearbyConnectionStatus.DISCONNECTED
-                _statusDetail.value = "P2P Bağlantısı Koptu"
+                _statusDetail.value = "P2P Bağlantısı Kesildi"
             } else {
-                _statusDetail.value = "Bağlı P2P Cihaz Sayısı: ${currentList.size}"
+                _statusDetail.value = "Bağlı Cihaz: ${currentList.size}"
             }
         }
     }
@@ -159,12 +163,40 @@ class NearbyConnectionService(private val context: Context) {
     }
 
     /**
-     * Starts advertising the local device to nearby discovery agents.
+     * Explicit User Acceptance of the Secure Handshake connection request.
+     */
+    fun acceptConnection(endpointId: String) {
+        connectionsClient.acceptConnection(endpointId, ServicePayloadCallback())
+            .addOnSuccessListener {
+                Log.d(TAG, "Successfully accepted connection request for $endpointId")
+            }
+            .addOnFailureListener { e ->
+                Log.e(TAG, "Failed to accept connection", e)
+                _status.value = NearbyConnectionStatus.ERROR
+                _statusDetail.value = "Kabul işlemi başarısız: ${e.localizedMessage}"
+            }
+    }
+
+    /**
+     * Explicit User Rejection of the connection request.
+     */
+    fun rejectConnection(endpointId: String) {
+        connectionsClient.rejectConnection(endpointId)
+            .addOnSuccessListener {
+                Log.d(TAG, "Successfully rejected connection for $endpointId")
+                _pendingRequest.value = null
+                _status.value = NearbyConnectionStatus.DISCONNECTED
+                _statusDetail.value = "Bağlantı reddedildi"
+            }
+    }
+
+    /**
+     * Starts advertising.
      */
     fun startAdvertising(localNickname: String, serviceId: String) {
         stopAll()
         _status.value = NearbyConnectionStatus.ADVERTISING
-        _statusDetail.value = "Bağlantı bekleniyor..."
+        _statusDetail.value = "Yayınlanıyor, bağlantı bekleniyor..."
 
         val options = AdvertisingOptions.Builder().setStrategy(STRATEGY).build()
         connectionsClient.startAdvertising(
@@ -173,21 +205,21 @@ class NearbyConnectionService(private val context: Context) {
             connectionLifecycleCallback,
             options
         ).addOnSuccessListener {
-            Log.d(TAG, "Advertising started successfully for service: $serviceId")
+            Log.d(TAG, "Advertising started for $serviceId")
         }.addOnFailureListener { e ->
-            Log.e(TAG, "Failed to start advertising", e)
+            Log.e(TAG, "Failed advertising", e)
             _status.value = NearbyConnectionStatus.ERROR
-            _statusDetail.value = "P2P Yayınlama Hatası: ${e.localizedMessage}"
+            _statusDetail.value = "Yayınlanamadı: ${e.localizedMessage}"
         }
     }
 
     /**
-     * Starts discovering nearby advertising agents.
+     * Starts discovery.
      */
     fun startDiscovery(serviceId: String) {
         stopAll()
         _status.value = NearbyConnectionStatus.DISCOVERING
-        _statusDetail.value = "Yakındaki cihazlar taranıyor..."
+        _statusDetail.value = "Ajanlar taranıyor..."
         _discoveredDevices.value = emptyList()
 
         val options = DiscoveryOptions.Builder().setStrategy(STRATEGY).build()
@@ -196,17 +228,14 @@ class NearbyConnectionService(private val context: Context) {
             endpointDiscoveryCallback,
             options
         ).addOnSuccessListener {
-            Log.d(TAG, "Discovery started successfully for service: $serviceId")
+            Log.d(TAG, "Discovery started for $serviceId")
         }.addOnFailureListener { e ->
-            Log.e(TAG, "Failed to start discovery", e)
+            Log.e(TAG, "Failed discovery", e)
             _status.value = NearbyConnectionStatus.ERROR
-            _statusDetail.value = "P2P Tarama Hatası"
+            _statusDetail.value = "Tarama başlatılamadı"
         }
     }
 
-    /**
-     * Connects to a specific discovered endpoint.
-     */
     fun connectToDevice(endpointId: String, localNickname: String) {
         _status.value = NearbyConnectionStatus.CONNECTING
         _statusDetail.value = "Bağlantı isteği gönderiliyor..."
@@ -216,28 +245,35 @@ class NearbyConnectionService(private val context: Context) {
             endpointId,
             connectionLifecycleCallback
         ).addOnSuccessListener {
-            Log.d(TAG, "Connection request sent successfully to $endpointId")
+            Log.d(TAG, "Connection request dispatched to $endpointId")
         }.addOnFailureListener { e ->
-            Log.e(TAG, "Failed to send connection request to $endpointId", e)
+            Log.e(TAG, "Failed requesting connection", e)
             _status.value = NearbyConnectionStatus.ERROR
-            _statusDetail.value = "Bağlantı isteği başarısız"
+            _statusDetail.value = "İstek başarısız oldu"
         }
     }
 
     /**
-     * Sends encrypted chat message payload to all connected devices.
+     * Encrypts and transmits the chat message over Nearby Connections using AES-GCM (AEAD).
+     * STRICTLY FORBIDS PLAINTEXT FALLBACK.
      */
     fun sendChatMessage(senderName: String, phoneNumber: String, messageText: String) {
         val activeIds = _connectedDevices.value.map { it.endpointId }
         if (activeIds.isEmpty()) return
 
         try {
-            // Encrypt message content locally using AES-256 (via simple cipher derivation)
+            // 1. Derive key securely from encryption key phrase
+            val secretKey = AEADEngine.deriveKey(encryptionKey)
+            
+            // 2. Strong AEAD Encryption of message content
+            val encryptedMessage = AEADEngine.encrypt(messageText, secretKey)
+
+            // 3. Serialize metadata and ciphertext
             val json = JSONObject().apply {
                 put("type", "CHAT")
                 put("sender", senderName)
                 put("phone", phoneNumber)
-                put("message", messageText)
+                put("payload", encryptedMessage) // AES-GCM Encrypted payload
                 put("timestamp", System.currentTimeMillis())
             }
 
@@ -246,18 +282,18 @@ class NearbyConnectionService(private val context: Context) {
 
             connectionsClient.sendPayload(activeIds, payload)
                 .addOnSuccessListener {
-                    Log.d(TAG, "Encrypted P2P payload dispatched successfully to $activeIds")
+                    Log.d(TAG, "Dispatched AEAD encrypted payload to $activeIds")
                 }
                 .addOnFailureListener { e ->
-                    Log.e(TAG, "Failed to send payload", e)
+                    Log.e(TAG, "Payload dispatch failed", e)
                 }
         } catch (e: Exception) {
-            Log.e(TAG, "Error packaging P2P message: ${e.message}")
+            Log.e(TAG, "Encryption/packaging error: ${e.message}")
         }
     }
 
     /**
-     * Direct incoming bytes handling and local message state delivery.
+     * Decrypts GCM-encrypted incoming payloads with strict tag verification.
      */
     private fun handleIncomingBytes(endpointId: String, data: ByteArray) {
         try {
@@ -268,21 +304,29 @@ class NearbyConnectionService(private val context: Context) {
             if (type == "CHAT") {
                 val sender = json.optString("sender", "Bilinmeyen Ajan")
                 val phone = json.optString("phone", "+90 000 000 0000")
-                val msg = json.optString("message")
+                val encryptedPayload = json.optString("payload")
                 val time = json.optLong("timestamp", System.currentTimeMillis())
 
-                onMessageReceived?.invoke(sender, phone, msg, time)
+                // 1. Derive key
+                val secretKey = AEADEngine.deriveKey(encryptionKey)
+
+                // 2. Attempt Decrypt. Plaintext fallback is forbidden!
+                val decryptedText = try {
+                    AEADEngine.decrypt(encryptedPayload, secretKey)
+                } catch (e: Exception) {
+                    Log.e(TAG, "Decryption failure: ${e.message}")
+                    "[Şifre Çözülemedi - Anahtar Uyuşmazlığı]"
+                }
+
+                onMessageReceived?.invoke(sender, phone, decryptedText, time)
             }
         } catch (e: Exception) {
-            Log.e(TAG, "Failed parsing incoming P2P payload: ${e.message}")
+            Log.e(TAG, "Failed parsing P2P payload: ${e.message}")
         }
     }
 
-    /**
-     * Stops all active discovery, advertising and closes current open endpoints.
-     */
     fun stopAll() {
-        Log.d(TAG, "Resetting NearbyConnectionService")
+        Log.d(TAG, "Resetting service")
         connectionsClient.stopAdvertising()
         connectionsClient.stopDiscovery()
         connectionsClient.stopAllEndpoints()
@@ -290,5 +334,6 @@ class NearbyConnectionService(private val context: Context) {
         _statusDetail.value = "P2P Pasif"
         _discoveredDevices.value = emptyList()
         _connectedDevices.value = emptyList()
+        _pendingRequest.value = null
     }
 }
