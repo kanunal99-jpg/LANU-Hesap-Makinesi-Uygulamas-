@@ -18,7 +18,7 @@ import org.robolectric.annotation.Config
 
 @OptIn(ExperimentalCoroutinesApi::class)
 @RunWith(RobolectricTestRunner::class)
-@Config(sdk = [36])
+@Config(sdk = [35])
 class SecretRealTimeCommunicationTest {
 
     private lateinit var context: Application

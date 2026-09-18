@@ -2,8 +2,7 @@ name: Release
 
 on:
   push:
-    tags:
-      - 'v*'
+    tags: ["v*"]
 
 jobs:
   release:
@@ -15,8 +14,13 @@ jobs:
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
-          distribution: 'temurin'
-          java-version: '17'
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle 9.3.1
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "9.3.1"
 
       - name: Build Release APK
         run: gradle :app:assembleRelease
@@ -26,8 +30,10 @@ jobs:
 
       - name: Generate SHA-256
         run: |
+          set -euo pipefail
           RELEASE_APK="app/build/outputs/apk/release/app-release.apk"
-          sha256sum "$RELEASE_APK" > "app-release.apk.sha256"
+          test -s "$RELEASE_APK"
+          sha256sum "$RELEASE_APK" > app-release.apk.sha256
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
